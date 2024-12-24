@@ -1,4 +1,5 @@
-import firebase_admin 
+import firebase_admin
+# TODO: Add error handling for Firebase initialization
 from firebase_admin import credentials, firestore, storage
 import cv2
 import numpy as np
