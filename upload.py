@@ -1,6 +1,7 @@
 import firebase_admin
 from firebase_admin import credentials, firestore
 import cv2
+# Keras model for face embeddings
 from tensorflow.keras.models import load_model
 import os
 from dotenv import load_dotenv
