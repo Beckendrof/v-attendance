@@ -1,93 +1,90 @@
-import numpy as np
+import firebase_admin 
+from firebase_admin import credentials, firestore, storage
 import cv2
-import face_recognition
-import os
+import numpy as np
+from mtcnn import MTCNN
 from datetime import datetime
+from dotenv import load_dotenv
+import scipy.spatial
+import os
+from tensorflow.keras.models import load_model
 
-path = 'Database'
-images = []
-classNames = []
-myList = os.listdir(path)
-print(myList)
+load_dotenv()
 
-for cl in myList:
-    curImg = cv2.imread(f'{path}/{cl}')
-    images.append(curImg)
-    classNames.append(os.path.splitext(cl)[0])
-print(classNames)
+firebase_cred_path = os.getenv('FIREBASE_ADMIN_SDK_PATH')
+firebase_bucket_name = os.getenv('FIREBASE_STORAGE_BUCKET')
 
-def findEncoding(images):
-    encodeList = []
-    for img in images:
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        encode = face_recognition.face_encodings(img)[0]
-        encodeList.append(encode)
-    return encodeList
+cred = credentials.Certificate("adminsdk.json")
+firebase_admin.initialize_app(cred, {
+    'storageBucket': firebase_bucket_name
+})
+db = firestore.client()
+bucket = storage.bucket()
 
-def markAttendance(name):
-    with open('attendance.csv',"r+") as f:
-        myDataList = f.readlines()
-        nameList = []
-        for line in myDataList:
-            entry = line.split(',')
-            nameList.append(entry[0])
-        if name not in nameList:
-            now = datetime.now()
-            dateString = now.strftime('%H: %M: %S')
-            f.writelines(f'\n{name},{dateString}')
+facenet_model = load_model('models/facenet_keras.h5')
 
+detector = MTCNN()
 
-encodeListKnown = findEncoding(images)
-print(len(encodeListKnown))
-print('Encoding Complete')
+def preprocess_image(img):
+    img = cv2.resize(img, (160, 160))
+    img = img.astype('float32') / 255.0
+    img = np.expand_dims(img, axis=0)
+    return img
+
+def generate_embedding(face_image):
+    preprocessed_image = preprocess_image(face_image)
+    embedding = facenet_model.predict(preprocessed_image)
+    return embedding
+
+def fetch_embeddings_from_firestore():
+    docs = db.collection('face_embeddings').stream()
+    embeddings = {}
+    for doc in docs:
+        embeddings[doc.id] = np.array(doc.to_dict()['embedding'])
+    return embeddings
+
+def mark_attendance_in_firestore(name):
+    doc_ref = db.collection('attendance').document(name)
+    now = datetime.now().strftime('%H:%M:%S')
+    doc_ref.set({'last_seen': now}, merge=True)
+
+known_embeddings = fetch_embeddings_from_firestore()
 
 cap = cv2.VideoCapture(0)
 
 while True:
     success, img = cap.read()
-    imgS = cv2.resize(img,(0,0),None,0.25,0.25)
+    imgS = cv2.resize(img, (0, 0), None, 0.25, 0.25)
     imgS = cv2.cvtColor(imgS, cv2.COLOR_BGR2RGB)
 
-    facesCurFrame = face_recognition.face_locations(imgS)
-    encodeCurFrame = face_recognition.face_encodings(imgS,facesCurFrame)
+    faces_cur_frame = detector.detect_faces(imgS)
 
-    for encodeFace,faceLoc in zip(encodeCurFrame,facesCurFrame):
-        matches = face_recognition.compare_faces(encodeListKnown,encodeFace)
-        faceDis = face_recognition.face_distance(encodeListKnown,encodeFace)
-        #print(faceDis)
-        matchIndex = np.argmin(faceDis)
+    for face in faces_cur_frame:
+        x, y, w, h = face['box']
+        face_image = imgS[y:y+h, x:x+w]
 
-        if matches[matchIndex]:
-            name = classNames[matchIndex].upper()
-            #print(name)
-            y1,x2,y2,x1 = faceLoc
-            y1, x2, y2, x1 = y1*4,x2*4,y2*4,x1*4
-            cv2.rectangle(img,(x1,y1),(x2,y2),(0,255,0),2)
-            cv2.rectangle(img,(x1,y2-35),(x2,y2),(0,255,0),cv2.FILLED)
-            cv2.putText(img,name,(x1+6,y2-6),cv2.FONT_HERSHEY_COMPLEX,1,(255,255,255),2)
-            markAttendance(name)
+        embedding = generate_embedding(face_image)
+
+        min_dist = float("inf")
+        matched_name = None
+
+        for name, known_embed in known_embeddings.items():
+            dist = scipy.spatial.distance.euclidean(embedding, known_embed)
+            if dist < min_dist:
+                min_dist = dist
+                matched_name = name
+
+        if min_dist < 0.6:
+            mark_attendance_in_firestore(matched_name)
+            cv2.putText(img, matched_name, (10, 30), cv2.FONT_HERSHEY_COMPLEX, 1, (0, 255, 0), 2)
         else:
-            y1, x2, y2, x1 = faceLoc
-            y1, x2, y2, x1 = y1 * 4, x2 * 4, y2 * 4, x1 * 4
-            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.rectangle(img, (x1, y2 - 35), (x2, y2), (0, 255, 0), cv2.FILLED)
-            cv2.putText(img, "NOT RECOGNIZED", (x1 + 6, y2 - 6), cv2.FONT_HERSHEY_COMPLEX, 0.5, (0, 0, 255), 2)
+            cv2.putText(img, "NOT RECOGNIZED", (10, 30), cv2.FONT_HERSHEY_COMPLEX, 1, (0, 0, 255), 2)
 
-    cv2.imshow('Webcam',img)
-    cv2.waitKey(1)
+    img = cv2.cvtColor(imgS, cv2.COLOR_RGB2BGR)
+    cv2.imshow('Webcam', img)
 
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
 
-
-
-# faceLoc = face_recognition.face_locations(imgElon)[0]
-# encodeElon = face_recognition.face_encodings(imgElon)[0]
-# cv2.rectangle(imgElon,(faceLoc[3],faceLoc[0]),(faceLoc[1],faceLoc[2]),(255,0,255),2)
-#
-# faceLocTest = face_recognition.face_locations(imgTest)[0]
-# encodeElonTest = face_recognition.face_encodings(imgTest)[0]
-# cv2.rectangle(imgTest,(faceLocTest[3],faceLocTest[0]),(faceLocTest[1],faceLocTest[2]),(255,0,255),2)
-#
-# results = face_recognition.compare_faces([encodeElon],encodeElonTest)
-# faceDis = face_recognition.face_distance([encodeElon],encodeElonTest)
-# print(results,faceDis)
-# cv2.putText(imgTest,f'{results}{round(faceDis[0],2)}',(50,50),cv2.FONT_HERSHEY_COMPLEX,1,(0,0,255),2)
+cap.release()
+cv2.destroyAllWindows()
